@@ -84,6 +84,8 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 	let loadingBasic = $state(true);
 	let loadingTracks = $state(true);
 	let tracksError = $state(false);
+	let tracksErrorMessage = $state('');
+	let tracksLoadingNotice = $state(false);
 	let showToast = $state(false);
 	let toastMessage = $state('Added to Library');
 	let toastType = $state<'success' | 'error' | 'info' | 'warning'>('success');
@@ -119,6 +121,10 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 	const previewCacheMap = new SvelteMap<string, boolean>();
 	let lastPreviewCacheKey = '';
 	let previewCacheAbort: AbortController | null = null;
+	let tracksRequestId = 0;
+
+	const TRACKS_LOADING_NOTICE_MS = 8_000;
+	const TRACKS_REQUEST_TIMEOUT_MS = 22_000;
 
 	const trackLinkMap = $derived.by(
 		() => new SvelteMap(trackLinks.map((tl) => [getDiscTrackKey(tl), tl]))
@@ -200,6 +206,8 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 		loadingBasic = true;
 		loadingTracks = true;
 		tracksError = false;
+		tracksErrorMessage = '';
+		tracksLoadingNotice = false;
 		loadingDiscovery = true;
 		moreByArtist = null;
 		similarAlbums = null;
@@ -291,19 +299,45 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 	}
 
 	async function doFetchTracks(albumId: string, signal: AbortSignal) {
+		const requestId = ++tracksRequestId;
 		tracksError = false;
+		tracksErrorMessage = '';
+		tracksLoadingNotice = false;
+		loadingTracks = true;
+
+		const timeoutController = new AbortController();
+		const noticeTimer = setTimeout(() => {
+			if (requestId === tracksRequestId && !signal.aborted) tracksLoadingNotice = true;
+		}, TRACKS_LOADING_NOTICE_MS);
+		const timeoutTimer = setTimeout(() => {
+			timeoutController.abort(new DOMException('Track list request timed out', 'TimeoutError'));
+		}, TRACKS_REQUEST_TIMEOUT_MS);
+		const requestSignal = AbortSignal.any([signal, timeoutController.signal]);
+
 		try {
-			const result = await fetchAlbumTracks(albumId, signal);
-			if (result) {
+			const result = await fetchAlbumTracks(albumId, requestSignal);
+			if (result && requestId === tracksRequestId && !signal.aborted) {
 				tracksInfo = result;
 				renderedTrackSections = buildRenderedTrackSections(result.tracks);
 				albumTracksCache.set(result, albumId);
 			}
 		} catch (e) {
+			if (signal.aborted || requestId !== tracksRequestId) return;
+			if (!tracksInfo) {
+				tracksError = true;
+				tracksErrorMessage = timeoutController.signal.aborted
+					? 'Track list took too long to load. Retry will check the album again.'
+					: "Couldn't load the track list.";
+			}
 			if (isAbortError(e)) return;
-			if (!tracksInfo) tracksError = true;
+		} finally {
+			clearTimeout(noticeTimer);
+			clearTimeout(timeoutTimer);
+			if (!signal.aborted && requestId === tracksRequestId) {
+				loadingTracks = false;
+				tracksLoadingNotice = false;
+			}
 		}
-		if (!signal.aborted) loadingTracks = false;
 	}
 
 	async function doFetchDiscovery(albumId: string, signal: AbortSignal) {
@@ -641,7 +675,10 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 	function retryTracks(): void {
 		loadingTracks = true;
 		tracksError = false;
-		const signal = abortController?.signal ?? new AbortController().signal;
+		tracksErrorMessage = '';
+		tracksLoadingNotice = false;
+		if (!abortController || abortController.signal.aborted) abortController = new AbortController();
+		const signal = abortController.signal;
 		void doFetchTracks(albumIdGetter(), signal);
 	}
 
@@ -751,6 +788,12 @@ export function createAlbumPageState(albumIdGetter: () => string) {
 		},
 		get tracksError() {
 			return tracksError;
+		},
+		get tracksErrorMessage() {
+			return tracksErrorMessage;
+		},
+		get tracksLoadingNotice() {
+			return tracksLoadingNotice;
 		},
 		get showToast() {
 			return showToast;

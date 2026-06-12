@@ -357,6 +357,10 @@ textarea {
 		padding-bottom: 6rem;
 	}
 
+	.musicseerr-bottom-nav {
+		display: none;
+	}
+
 	.musicseerr-player-bar {
 		bottom: 0;
 	}

@@ -154,3 +154,62 @@ async def test_get_album_tracks_info_multi_disc_same_track_numbers():
     assert (2, 1, "Intro II") in disc_track_pairs
     assert (2, 2, "Finale") in disc_track_pairs
     assert result.total_length == 7500
+
+
+@pytest.mark.asyncio
+async def test_get_album_tracks_info_falls_back_to_musicbrainz_when_lidarr_tracks_empty():
+    service, lidarr_repo, _ = _make_service()
+    service._get_cached_album_info = AsyncMock(return_value=None)
+    service._fetch_release_group = AsyncMock(
+        return_value={
+            "releases": [
+                {"id": "release-1", "status": "Official", "country": "US"},
+            ]
+        }
+    )
+    service._mb_repo.get_release_by_id = AsyncMock(
+        return_value={
+            "media": [
+                {
+                    "position": "1",
+                    "tracks": [
+                        {
+                            "position": "1",
+                            "title": "Wanna Be Startin' Somethin'",
+                            "length": 363000,
+                            "recording": {
+                                "id": "recording-1",
+                                "title": "Wanna Be Startin' Somethin'",
+                            },
+                        },
+                        {
+                            "position": "4",
+                            "title": "Thriller",
+                            "length": 357000,
+                            "recording": {"id": "recording-4", "title": "Thriller"},
+                        },
+                    ],
+                }
+            ],
+            "label-info": [{"label": {"name": "Epic"}}],
+            "barcode": "074643811224",
+            "country": "US",
+        }
+    )
+    lidarr_repo.is_configured.return_value = True
+    lidarr_repo.get_album_details = AsyncMock(
+        return_value={"id": 42, "monitored": True, "statistics": {"trackFileCount": 1}}
+    )
+    lidarr_repo.get_album_tracks = AsyncMock(return_value=[])
+
+    result = await service.get_album_tracks_info("8e1e9e51-38dc-4df3-8027-a0ada37d4674")
+
+    assert [(track.position, track.title) for track in result.tracks] == [
+        (1, "Wanna Be Startin' Somethin'"),
+        (4, "Thriller"),
+    ]
+    assert result.total_tracks == 2
+    assert result.total_length == 720000
+    assert result.label == "Epic"
+    assert result.barcode == "074643811224"
+    assert result.country == "US"

@@ -395,6 +395,9 @@ class AlbumService:
                 album_id = lidarr_album.get("id")
                 tracks = []
                 total_length = 0
+                label = None
+                barcode = None
+                country = None
                 
                 if album_id:
                     lidarr_tracks = await self._lidarr_repo.get_album_tracks(album_id)
@@ -409,44 +412,33 @@ class AlbumService:
                             length=duration_ms if duration_ms else None,
                             recording_id=None,
                         ))
+
+                if not tracks:
+                    try:
+                        tracks, total_length, release_data = await self._fetch_musicbrainz_tracks(
+                            release_group_id
+                        )
+                        if release_data:
+                            label = extract_label(release_data)
+                            barcode = release_data.get("barcode")
+                            country = release_data.get("country")
+                    except Exception as e:  # noqa: BLE001
+                        logger.warning(
+                            "MusicBrainz fallback for library album tracks failed for %s: %s",
+                            release_group_id[:8],
+                            e,
+                        )
                 
                 return AlbumTracksInfo(
                     tracks=tracks,
                     total_tracks=len(tracks),
                     total_length=total_length if total_length > 0 else None,
-                    label=None,
-                    barcode=None,
-                    country=None,
+                    label=label,
+                    barcode=barcode,
+                    country=country,
                 )
             
-            release_group = await self._fetch_release_group(release_group_id)
-            ranked_releases = get_ranked_releases(release_group)
-            
-            if not ranked_releases:
-                return AlbumTracksInfo(tracks=[], total_tracks=0)
-            
-            tracks: list[Track] = []
-            total_length = 0
-            release_data = None
-
-            candidate_ids = [r.get("id") for r in ranked_releases[:3] if r.get("id")]
-            if candidate_ids:
-                release_results = await asyncio.gather(
-                    *(self._mb_repo.get_release_by_id(rid, includes=["recordings", "labels"]) for rid in candidate_ids),
-                    return_exceptions=True,
-                )
-                failures = [r for r in release_results if isinstance(r, Exception)]
-                if failures:
-                    logger.warning(f"Album {release_group_id[:8]}: {len(failures)}/{len(candidate_ids)} release fetches failed")
-                for result in release_results:
-                    if isinstance(result, Exception) or not result:
-                        continue
-                    found_tracks, found_length = extract_tracks(result)
-                    if found_tracks:
-                        tracks = found_tracks
-                        total_length = found_length
-                        release_data = result
-                        break
+            tracks, total_length, release_data = await self._fetch_musicbrainz_tracks(release_group_id)
             
             if not release_data:
                 return AlbumTracksInfo(tracks=[], total_tracks=0)
@@ -467,6 +459,38 @@ class AlbumService:
         except Exception as e:  # noqa: BLE001
             logger.error(f"Failed to get album tracks for {release_group_id}: {e}")
             raise ResourceNotFoundError(f"Failed to get album tracks: {e}")
+
+    async def _fetch_musicbrainz_tracks(self, release_group_id: str) -> tuple[list[Track], int, dict | None]:
+        release_group = await self._fetch_release_group(release_group_id)
+        ranked_releases = get_ranked_releases(release_group)
+
+        if not ranked_releases:
+            return [], 0, None
+
+        candidate_ids = [r.get("id") for r in ranked_releases[:3] if r.get("id")]
+        if not candidate_ids:
+            return [], 0, None
+
+        release_results = await asyncio.gather(
+            *(self._mb_repo.get_release_by_id(rid, includes=["recordings", "labels"]) for rid in candidate_ids),
+            return_exceptions=True,
+        )
+        failures = [r for r in release_results if isinstance(r, Exception)]
+        if failures:
+            logger.warning(
+                "Album %s: %s/%s release fetches failed",
+                release_group_id[:8],
+                len(failures),
+                len(candidate_ids),
+            )
+        for result in release_results:
+            if isinstance(result, Exception) or not result:
+                continue
+            found_tracks, found_length = extract_tracks(result)
+            if found_tracks:
+                return found_tracks, found_length, result
+
+        return [], 0, None
 
     async def _fetch_release_group(self, release_group_id: str) -> dict:
         rg_result = await self._mb_repo.get_release_group_by_id(

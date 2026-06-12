@@ -62,15 +62,47 @@ jobs:
           python-version: '3.13'
 
       - name: Install dependencies
-        run: pip install httpx==0.28.1 openai>=1.0
+        run: pip install httpx==0.28.1 'openai>=1.0' pyyaml==6.0.2
 
       - name: Run AI review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          AI_REVIEW_PROVIDER_ORDER: ${{ vars.AI_REVIEW_PROVIDER_ORDER || 'local-ai,nous,opencode,opencode-go,deepseek,openrouter,openai' }}
+          AI_REVIEW_FALLBACK_ROUTE: ${{ vars.AI_REVIEW_FALLBACK_ROUTE || 'Route this PR to another configured reviewer lane, then rerun `/ai-review`.' }}
+          AI_REVIEW_LOAD_HERMES_ENV: ${{ vars.AI_REVIEW_LOAD_HERMES_ENV || 'true' }}
+          HERMES_HOME: ${{ vars.HERMES_HOME }}
+          HERMES_ENV_FILE: ${{ vars.HERMES_ENV_FILE }}
+          HERMES_CONFIG_FILE: ${{ vars.HERMES_CONFIG_FILE }}
+          LOCAL_AI_BASE_URL: ${{ vars.LOCAL_AI_BASE_URL || vars.AI_ROUTER_BASE_URL }}
+          LOCAL_AI_MODEL: ${{ vars.LOCAL_AI_MODEL || vars.AI_ROUTER_MODEL || 'qwen3.6-27b' }}
+          LOCAL_AI_API_KEY: ${{ secrets.LOCAL_AI_API_KEY || secrets.AI_ROUTER_API_KEY }}
+          AI_ROUTER_API_KEY: ${{ secrets.AI_ROUTER_API_KEY }}
+          NOUS_API_KEY: ${{ secrets.NOUS_API_KEY || secrets.NOUS_PORTAL_API_KEY }}
+          NOUS_PORTAL_API_KEY: ${{ secrets.NOUS_PORTAL_API_KEY }}
+          NOUS_INFERENCE_BASE_URL: ${{ vars.NOUS_INFERENCE_BASE_URL || vars.NOUS_BASE_URL || 'https://inference.nousresearch.com/v1' }}
+          NOUS_BASE_URL: ${{ vars.NOUS_BASE_URL || vars.NOUS_INFERENCE_BASE_URL || 'https://inference.nousresearch.com/v1' }}
+          NOUS_MODEL: ${{ vars.NOUS_MODEL || vars.NOUS_PORTAL_MODEL || 'hermes-3-70b' }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY || secrets.OPENCODE_ZEN_API_KEY }}
+          OPENCODE_ZEN_API_KEY: ${{ secrets.OPENCODE_ZEN_API_KEY }}
+          OPENCODE_BASE_URL: ${{ vars.OPENCODE_BASE_URL || vars.OPENCODE_ZEN_BASE_URL || 'https://opencode.ai/zen/v1' }}
+          OPENCODE_ZEN_BASE_URL: ${{ vars.OPENCODE_ZEN_BASE_URL || vars.OPENCODE_BASE_URL || 'https://opencode.ai/zen/v1' }}
+          OPENCODE_MODEL: ${{ vars.OPENCODE_MODEL || vars.OPENCODE_ZEN_MODEL || 'gemini-3-flash' }}
+          OPENCODE_ZEN_MODEL: ${{ vars.OPENCODE_ZEN_MODEL || vars.OPENCODE_MODEL || 'gemini-3-flash' }}
+          OPENCODE_GO_API_KEY: ${{ secrets.OPENCODE_GO_API_KEY }}
+          OPENCODE_GO_BASE_URL: ${{ vars.OPENCODE_GO_BASE_URL || 'https://opencode.ai/zen/go/v1' }}
+          OPENCODE_GO_MODEL: ${{ vars.OPENCODE_GO_MODEL || 'glm-5' }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-pro' }}
           DEEPSEEK_REASONING_EFFORT: ${{ vars.DEEPSEEK_REASONING_EFFORT || 'max' }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          OPENROUTER_BASE_URL: ${{ vars.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1' }}
+          OPENROUTER_MODEL: ${{ vars.OPENROUTER_MODEL || 'openai/gpt-5-mini' }}
+          OPENROUTER_HTTP_REFERER: ${{ vars.OPENROUTER_HTTP_REFERER || format('https://github.com/{0}', github.repository) }}
+          OPENROUTER_X_TITLE: ${{ vars.OPENROUTER_X_TITLE || 'MusicSeerr AI Review' }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-5-mini' }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_ACTION: ${{ github.event.action }}
           DEBUG: ${{ vars.AI_REVIEW_DEBUG || 'false' }}

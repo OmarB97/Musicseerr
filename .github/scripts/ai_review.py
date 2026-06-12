@@ -10,6 +10,7 @@ environment variables and never interpolated into shell commands.
 from __future__ import annotations
 
 import asyncio, json, logging, os, re, textwrap
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,9 +21,24 @@ from openai import OpenAI
 # Configuration
 # ---------------------------------------------------------------------------
 
+AI_REVIEW_PROVIDER_ORDER = os.getenv(
+    "AI_REVIEW_PROVIDER_ORDER",
+    "deepseek,openrouter,openai",
+)
+AI_REVIEW_FALLBACK_ROUTE = os.getenv(
+    "AI_REVIEW_FALLBACK_ROUTE",
+    "Route this PR to another configured reviewer lane, then rerun `/ai-review`.",
+)
+
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEEPSEEK_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "max")
+
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
+OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5-mini")
+
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "")
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5-mini")
 REVIEWER_NAME = "musicseerr-ai-reviewer[bot]"
 
 GITHUB_REPOSITORY = os.environ["GITHUB_REPOSITORY"]
@@ -36,6 +52,38 @@ GUIDELINES_PATH = os.environ.get("GUIDELINES_PATH", ".github/review_guidelines.m
 MAX_INPUT_TOKENS = 900_000
 
 log = logging.getLogger("ai_review")
+
+
+@dataclass(frozen=True)
+class ReviewProvider:
+    name: str
+    api_key_env: str
+    base_url: str
+    model: str
+    reasoning_effort: str | None = None
+    extra_body: dict[str, Any] | None = None
+    default_headers: dict[str, str] | None = None
+
+
+@dataclass(frozen=True)
+class LLMReview:
+    provider: ReviewProvider
+    data: dict[str, Any]
+
+
+class NoReviewProviderError(RuntimeError):
+    def __init__(self, skipped: list[str], failures: list[str]) -> None:
+        self.skipped = skipped
+        self.failures = failures
+        super().__init__(str(self))
+
+    def __str__(self) -> str:
+        parts: list[str] = []
+        if self.skipped:
+            parts.append("skipped " + "; ".join(self.skipped))
+        if self.failures:
+            parts.append("failed " + "; ".join(self.failures))
+        return "; ".join(parts) or "no review providers were configured"
 
 # ---------------------------------------------------------------------------
 # Helpers: GitHub REST API
@@ -331,35 +379,118 @@ def _estimate_tokens(text: str) -> int:
 
 
 # ---------------------------------------------------------------------------
-# DeepSeek / OpenAI-compatible API call
+# OpenAI-compatible provider routing
 # ---------------------------------------------------------------------------
 
-async def call_llm(system: str, user: str) -> dict[str, Any]:
-    api_key = os.environ.get("DEEPSEEK_API_KEY", "")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY is not set")
+def _review_providers() -> list[ReviewProvider]:
+    providers = {
+        "deepseek": ReviewProvider(
+            name="deepseek",
+            api_key_env="DEEPSEEK_API_KEY",
+            base_url=DEEPSEEK_BASE_URL,
+            model=DEEPSEEK_MODEL,
+            reasoning_effort=DEEPSEEK_REASONING_EFFORT,
+            extra_body={"thinking": {"type": "enabled"}},
+        ),
+        "openrouter": ReviewProvider(
+            name="openrouter",
+            api_key_env="OPENROUTER_API_KEY",
+            base_url=OPENROUTER_BASE_URL,
+            model=OPENROUTER_MODEL,
+            default_headers={
+                "HTTP-Referer": os.getenv(
+                    "OPENROUTER_HTTP_REFERER",
+                    f"https://github.com/{GITHUB_REPOSITORY}",
+                ),
+                "X-Title": os.getenv("OPENROUTER_X_TITLE", "MusicSeerr AI Review"),
+            },
+        ),
+        "openai": ReviewProvider(
+            name="openai",
+            api_key_env="OPENAI_API_KEY",
+            base_url=OPENAI_BASE_URL,
+            model=OPENAI_MODEL,
+        ),
+    }
 
-    client = OpenAI(
-        api_key=api_key,
-        base_url=DEEPSEEK_BASE_URL,
-        timeout=httpx.Timeout(120.0, connect=10.0),
-    )
+    ordered: list[ReviewProvider] = []
+    for raw_name in AI_REVIEW_PROVIDER_ORDER.split(","):
+        name = raw_name.strip().lower()
+        if not name:
+            continue
+        provider = providers.get(name)
+        if provider is None:
+            log.warning("Unknown AI review provider in order: %s", name)
+            continue
+        ordered.append(provider)
+    return ordered
+
+
+async def call_llm(system: str, user: str) -> LLMReview:
+    skipped: list[str] = []
+    failures: list[str] = []
+
+    for provider in _review_providers():
+        api_key = os.environ.get(provider.api_key_env, "")
+        if not api_key:
+            skipped.append(f"{provider.name} ({provider.api_key_env} is not set)")
+            continue
+
+        if not provider.model:
+            skipped.append(f"{provider.name} (model is not configured)")
+            continue
+
+        try:
+            data = await _call_provider(provider, api_key, system, user)
+            return LLMReview(provider=provider, data=data)
+        except Exception as exc:
+            log.exception("AI review provider failed: %s", provider.name)
+            failures.append(f"{provider.name}: {exc}")
+
+    raise NoReviewProviderError(skipped, failures)
+
+
+async def _call_provider(
+    provider: ReviewProvider,
+    api_key: str,
+    system: str,
+    user: str,
+) -> dict[str, Any]:
+    client_args: dict[str, Any] = {
+        "api_key": api_key,
+        "timeout": httpx.Timeout(120.0, connect=10.0),
+    }
+    if provider.base_url:
+        client_args["base_url"] = provider.base_url
+    if provider.default_headers:
+        client_args["default_headers"] = provider.default_headers
+
+    client = OpenAI(**client_args)
 
     total_tokens = _estimate_tokens(system) + _estimate_tokens(user)
-    log.info("Sending prompt (~%d estimated tokens) to %s", total_tokens, DEEPSEEK_MODEL)
+    log.info(
+        "Sending prompt (~%d estimated tokens) to %s/%s",
+        total_tokens,
+        provider.name,
+        provider.model,
+    )
 
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": system},
         {"role": "user", "content": user},
     ]
 
-    response = client.chat.completions.create(
-        model=DEEPSEEK_MODEL,
-        messages=messages,
-        response_format={"type": "json_object"},
-        reasoning_effort=DEEPSEEK_REASONING_EFFORT,
-        extra_body={"thinking": {"type": "enabled"}},
-    )
+    request: dict[str, Any] = {
+        "model": provider.model,
+        "messages": messages,
+        "response_format": {"type": "json_object"},
+    }
+    if provider.reasoning_effort:
+        request["reasoning_effort"] = provider.reasoning_effort
+    if provider.extra_body:
+        request["extra_body"] = provider.extra_body
+
+    response = client.chat.completions.create(**request)
 
     usage = response.usage
     if usage:
@@ -384,6 +515,7 @@ async def post_review(
     summary: str,
     findings: list[dict[str, Any]],
     conclusion: str,
+    provider_name: str,
 ) -> None:
     url = f"{GITHUB_API}/repos/{GITHUB_REPOSITORY}/pulls/{pr_number}/reviews"
 
@@ -404,7 +536,7 @@ async def post_review(
         f"{summary}\n\n"
         f"{findings_summary}\n\n"
         f"---\n"
-        f"*Automated review by MusicSeerr AI Reviewer. "
+        f"*Automated review by MusicSeerr AI Reviewer via `{provider_name}`. "
         f"See `.github/review_guidelines.md` for review criteria.*"
     )
 
@@ -460,8 +592,14 @@ async def post_failure_comment(pr_number: int, reason: str) -> None:
         f"{GITHUB_API}/repos/{GITHUB_REPOSITORY}/issues/{pr_number}/comments"
     )
     body = (
-        f"AI review is unavailable: {reason}\n\n"
-        f"Please review this PR manually."
+        f"AI review could not be routed to an available provider.\n\n"
+        f"Reason: {reason}\n\n"
+        f"Next route:\n"
+        f"- Configure one of the fallback provider credentials "
+        f"(`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`) "
+        f"and rerun `/ai-review`.\n"
+        f"- {AI_REVIEW_FALLBACK_ROUTE}\n\n"
+        f"<!-- ai-review:route-needed -->"
     )
     await gh_post(url, {"body": body})
 
@@ -581,10 +719,11 @@ async def run() -> None:
     user = build_user_prompt(pr_info, files, diff, incremental=is_incremental)
 
     try:
-        result = await call_llm(system, user)
+        review = await call_llm(system, user)
+        result = review.data
     except Exception as exc:
-        log.exception("DeepSeek API call failed")
-        await post_failure_comment(pr_number, f"DeepSeek API error: {exc}")
+        log.exception("AI review provider routing failed")
+        await post_failure_comment(pr_number, str(exc))
         return
 
     try:
@@ -593,14 +732,14 @@ async def run() -> None:
         log.warning("Response validation failed: %s  retrying once...", exc)
         retry_user = user + f"\n\nYour previous response was invalid: {exc}\nPlease fix and return valid JSON."
         try:
-            result = await call_llm(system, retry_user)
+            review = await call_llm(system, retry_user)
+            result = review.data
             validate_response(result)
         except Exception as exc2:
             log.exception("Retry also failed")
             await post_failure_comment(
                 pr_number,
-                f"AI review produced an invalid response and the retry also failed. "
-                f"Please review this PR manually.",
+                f"AI review produced an invalid response and the retry also failed: {exc2}",
             )
             return
 
@@ -608,8 +747,20 @@ async def run() -> None:
     findings = result["findings"]
     conclusion = result["conclusion"]
 
-    await post_review(pr_number, commit_id, summary, findings, conclusion)
-    log.info("Review posted successfully: %d findings, conclusion=%s", len(findings), conclusion)
+    await post_review(
+        pr_number,
+        commit_id,
+        summary,
+        findings,
+        conclusion,
+        review.provider.name,
+    )
+    log.info(
+        "Review posted successfully via %s: %d findings, conclusion=%s",
+        review.provider.name,
+        len(findings),
+        conclusion,
+    )
 
 
 # ---------------------------------------------------------------------------

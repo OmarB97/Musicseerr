@@ -11,6 +11,7 @@
 	import AlbumSourceBars from './AlbumSourceBars.svelte';
 	import AlbumTrackList from './AlbumTrackList.svelte';
 	import AlbumDiscovery from './AlbumDiscovery.svelte';
+	import { formatReleaseDate } from '$lib/utils/formatting';
 
 	let { data }: { data: { albumId: string } } = $props();
 
@@ -90,6 +91,11 @@
 							{/each}
 						</ul>
 					</div>
+					{#if state.tracksLoadingNotice}
+						<p class="text-sm text-base-content/60">
+							Still checking MusicBrainz and your library sources...
+						</p>
+					{/if}
 				</div>
 			{:else if state.tracksInfo && state.tracksInfo.tracks.length > 0}
 				<div class="space-y-3">
@@ -172,7 +178,7 @@
 				<div class="space-y-3">
 					<h2 class="text-xl sm:text-2xl font-bold">Tracks</h2>
 					<div class="alert alert-warning">
-						<span>Couldn't load the track list.</span>
+						<span>{state.tracksErrorMessage || "Couldn't load the track list."}</span>
 						<button class="btn btn-sm btn-ghost" onclick={state.retryTracks}> Retry </button>
 					</div>
 				</div>
@@ -180,7 +186,7 @@
 				<div class="space-y-3">
 					<h2 class="text-xl sm:text-2xl font-bold">Tracks</h2>
 					<div class="alert alert-warning">
-						<span>No tracks available.</span>
+						<span>No track listing found for this release yet.</span>
 						<button class="btn btn-sm btn-ghost" onclick={state.retryTracks}> Retry </button>
 					</div>
 				</div>
@@ -189,7 +195,7 @@
 			{#if album.release_date}
 				<div class="text-xs opacity-60">
 					<span class="font-semibold">Release Date:</span>
-					{album.release_date}
+					{formatReleaseDate(album.release_date)}
 				</div>
 			{/if}
 

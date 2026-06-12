@@ -62,6 +62,38 @@ export function formatTotalDurationSec(sec?: number | null): string {
 	return `${minutes} min`;
 }
 
+export function formatReleaseDate(value?: string | null): string {
+	if (!value) return '';
+	const trimmed = value.trim();
+	if (!trimmed) return '';
+
+	const musicBrainzDate = trimmed.match(/^(\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:[T ].*)?$/);
+	if (musicBrainzDate) {
+		const [, year, month, day] = musicBrainzDate;
+		if (!month) return year;
+
+		const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day ?? '1')));
+		if (Number.isNaN(date.getTime())) return trimmed;
+
+		return new Intl.DateTimeFormat('en-US', {
+			timeZone: 'UTC',
+			year: 'numeric',
+			month: 'long',
+			...(day ? { day: 'numeric' } : {})
+		}).format(date);
+	}
+
+	const parsed = new Date(trimmed);
+	if (Number.isNaN(parsed.getTime())) return trimmed;
+
+	return new Intl.DateTimeFormat('en-US', {
+		timeZone: 'UTC',
+		year: 'numeric',
+		month: 'long',
+		day: 'numeric'
+	}).format(parsed);
+}
+
 export function formatRelativeTime(date: Date): string {
 	const now = new Date();
 	const diffMs = now.getTime() - date.getTime();

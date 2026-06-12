@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { formatListenCount } from './formatting';
+import { formatListenCount, formatReleaseDate } from './formatting';
 
 describe('formatListenCount', () => {
 	it('returns empty string for null', () => {
@@ -50,5 +50,23 @@ describe('formatListenCount', () => {
 	it('formats billions compact', () => {
 		expect.assertions(1);
 		expect(formatListenCount(3596400000, true)).toBe('3.6B');
+	});
+});
+
+describe('formatReleaseDate', () => {
+	it('formats ISO release timestamps without timezone drift', () => {
+		expect.assertions(1);
+		expect(formatReleaseDate('1982-11-30T00:00:00Z')).toBe('November 30, 1982');
+	});
+
+	it('formats partial MusicBrainz dates', () => {
+		expect.assertions(2);
+		expect(formatReleaseDate('1982-11')).toBe('November 1982');
+		expect(formatReleaseDate('1982')).toBe('1982');
+	});
+
+	it('falls back to the original value when a date is not parseable', () => {
+		expect.assertions(1);
+		expect(formatReleaseDate('unknown')).toBe('unknown');
 	});
 });

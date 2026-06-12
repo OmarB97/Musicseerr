@@ -268,7 +268,7 @@
 					class="musicseerr-topbar navbar bg-base-100/95 backdrop-blur shadow-sm sticky top-0 z-50"
 				>
 					<div class="navbar-start w-auto">
-						<a href="/" class="btn btn-ghost px-2 max-[380px]:hidden sm:px-4" aria-label="Home">
+						<a href="/" class="btn btn-ghost px-2 max-xs:hidden sm:px-4" aria-label="Home">
 							<img src="/logo_wide.png" alt="Musicseerr" class="h-8 hidden sm:block" />
 							<img src="/logo_icon.png" alt="Musicseerr" class="h-8 block sm:hidden" />
 						</a>

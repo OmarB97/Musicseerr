@@ -16,6 +16,9 @@
 }
 
 @theme {
+	/* Narrow-phone cutoff: below this the topbar (home link + search + profile)
+	   no longer fits on one row, so non-essential items hide via max-xs:. */
+	--breakpoint-xs: 380px;
 	--animate-shimmer: shimmer 2s ease-in-out infinite;
 	--animate-glow-pulse: glow-pulse 2.5s ease-in-out infinite;
 	--animate-float: float 3s ease-in-out infinite;

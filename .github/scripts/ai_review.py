@@ -9,7 +9,7 @@ environment variables and never interpolated into shell commands.
 
 from __future__ import annotations
 
-import asyncio, json, logging, os, re, textwrap
+import asyncio, json, logging, os, re, shlex, textwrap
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,9 +21,150 @@ from openai import OpenAI
 # Configuration
 # ---------------------------------------------------------------------------
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _load_env_file(path: Path) -> bool:
+    if not path.exists() or not path.is_file():
+        return False
+
+    for raw_line in path.read_text(errors="ignore").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].strip()
+        if "=" not in line:
+            continue
+
+        key, raw_value = line.split("=", 1)
+        key = key.strip()
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", key):
+            continue
+
+        value = raw_value.strip()
+        try:
+            parsed = shlex.split(value, comments=False, posix=True)
+            if parsed:
+                value = parsed[0]
+        except ValueError:
+            value = value.strip("\"'")
+
+        if value:
+            os.environ.setdefault(key, value)
+
+    return True
+
+
+def _candidate_hermes_paths(file_env: str, default_name: str) -> list[Path]:
+    paths: list[Path] = []
+    explicit = os.getenv(file_env)
+    if explicit:
+        paths.append(Path(explicit).expanduser())
+
+    hermes_home = Path(os.getenv("HERMES_HOME") or "~/.hermes").expanduser()
+    paths.append(hermes_home / default_name)
+    paths.append(Path.home() / ".hermes" / default_name)
+
+    deduped: list[Path] = []
+    seen: set[Path] = set()
+    for path in paths:
+        resolved = path.resolve() if path.exists() else path
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        deduped.append(path)
+    return deduped
+
+
+def _load_hermes_env() -> None:
+    if not _env_bool("AI_REVIEW_LOAD_HERMES_ENV", default=True):
+        return
+    for path in _candidate_hermes_paths("HERMES_ENV_FILE", ".env"):
+        if _load_env_file(path):
+            return
+
+
+def _load_hermes_config_defaults() -> None:
+    if not _env_bool("AI_REVIEW_LOAD_HERMES_ENV", default=True):
+        return
+
+    for path in _candidate_hermes_paths("HERMES_CONFIG_FILE", "config.yaml"):
+        if not path.exists() or not path.is_file():
+            continue
+        try:
+            import yaml  # type: ignore
+            data = yaml.safe_load(path.read_text()) or {}
+        except Exception:
+            return
+
+        providers = data.get("providers") or {}
+        if not isinstance(providers, dict):
+            return
+
+        _set_provider_api_default(
+            providers,
+            ("ai-router", "local-ai", "local_ai"),
+            ("AI_ROUTER_BASE_URL", "LOCAL_AI_BASE_URL"),
+        )
+        _set_provider_api_default(
+            providers,
+            ("opencode-zen", "opencode", "opencode_zen", "zen"),
+            ("OPENCODE_BASE_URL", "OPENCODE_ZEN_BASE_URL"),
+        )
+        _set_provider_api_default(
+            providers,
+            ("opencode-go", "opencode_go", "go", "opencode-go-sub"),
+            ("OPENCODE_GO_BASE_URL",),
+        )
+        _set_provider_api_default(
+            providers,
+            ("nous", "nous-portal", "nousresearch"),
+            ("NOUS_BASE_URL", "NOUS_INFERENCE_BASE_URL"),
+        )
+        return
+
+
+def _set_provider_api_default(
+    providers: dict[str, Any],
+    aliases: tuple[str, ...],
+    env_names: tuple[str, ...],
+) -> None:
+    alias_set = {alias.lower() for alias in aliases}
+    for name, provider in providers.items():
+        if str(name).lower() not in alias_set or not isinstance(provider, dict):
+            continue
+        api = provider.get("api") or provider.get("base_url") or provider.get("url")
+        if not isinstance(api, str) or not api.strip():
+            return
+        for env_name in env_names:
+            os.environ.setdefault(env_name, api.strip())
+        return
+
+
+def _local_ai_base_url() -> str:
+    raw = (
+        os.getenv("LOCAL_AI_BASE_URL")
+        or os.getenv("AI_ROUTER_BASE_URL")
+        or ""
+    ).strip().rstrip("/")
+    if not raw:
+        return ""
+    if re.search(r"/v\d+$", raw):
+        return raw
+    return f"{raw}/v1"
+
+
+_load_hermes_env()
+_load_hermes_config_defaults()
+
 AI_REVIEW_PROVIDER_ORDER = os.getenv(
     "AI_REVIEW_PROVIDER_ORDER",
-    "local-ai,deepseek,openrouter,openai",
+    "local-ai,nous,opencode,opencode-go,deepseek,openrouter,openai",
 )
 AI_REVIEW_FALLBACK_ROUTE = os.getenv(
     "AI_REVIEW_FALLBACK_ROUTE",
@@ -34,16 +175,39 @@ DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEEPSEEK_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "max")
 
-LOCAL_AI_BASE_URL = (
-    os.getenv("LOCAL_AI_BASE_URL")
-    or os.getenv("AI_ROUTER_BASE_URL")
-    or ""
-)
+LOCAL_AI_BASE_URL = _local_ai_base_url()
 LOCAL_AI_MODEL = (
     os.getenv("LOCAL_AI_MODEL")
     or os.getenv("AI_ROUTER_MODEL")
     or "qwen3.6-27b"
 )
+
+NOUS_BASE_URL = (
+    os.getenv("NOUS_INFERENCE_BASE_URL")
+    or os.getenv("NOUS_BASE_URL")
+    or "https://inference.nousresearch.com/v1"
+)
+NOUS_MODEL = (
+    os.getenv("NOUS_MODEL")
+    or os.getenv("NOUS_PORTAL_MODEL")
+    or "hermes-3-70b"
+)
+
+OPENCODE_BASE_URL = (
+    os.getenv("OPENCODE_BASE_URL")
+    or os.getenv("OPENCODE_ZEN_BASE_URL")
+    or "https://opencode.ai/zen/v1"
+)
+OPENCODE_MODEL = (
+    os.getenv("OPENCODE_MODEL")
+    or os.getenv("OPENCODE_ZEN_MODEL")
+    or "gemini-3-flash"
+)
+OPENCODE_GO_BASE_URL = os.getenv(
+    "OPENCODE_GO_BASE_URL",
+    "https://opencode.ai/zen/go/v1",
+)
+OPENCODE_GO_MODEL = os.getenv("OPENCODE_GO_MODEL", "glm-5")
 
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5-mini")
@@ -404,11 +568,42 @@ def _review_providers() -> list[ReviewProvider]:
         requires_api_key=False,
         requires_base_url=True,
     )
+    nous = ReviewProvider(
+        name="nous",
+        api_key_envs=("NOUS_API_KEY", "NOUS_PORTAL_API_KEY"),
+        base_url=NOUS_BASE_URL,
+        model=NOUS_MODEL,
+    )
+    opencode = ReviewProvider(
+        name="opencode",
+        api_key_envs=("OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"),
+        base_url=OPENCODE_BASE_URL,
+        model=OPENCODE_MODEL,
+    )
+    opencode_go = ReviewProvider(
+        name="opencode-go",
+        api_key_envs=("OPENCODE_GO_API_KEY",),
+        base_url=OPENCODE_GO_BASE_URL,
+        model=OPENCODE_GO_MODEL,
+    )
     providers = {
         "local-ai": local_ai,
         "local_ai": local_ai,
         "ai-router": local_ai,
         "ai_router": local_ai,
+        "nous": nous,
+        "nous-portal": nous,
+        "nous_portal": nous,
+        "nousresearch": nous,
+        "nous-research": nous,
+        "opencode": opencode,
+        "opencode-zen": opencode,
+        "opencode_zen": opencode,
+        "zen": opencode,
+        "opencode-go": opencode_go,
+        "opencode_go": opencode_go,
+        "opencode-go-sub": opencode_go,
+        "go": opencode_go,
         "deepseek": ReviewProvider(
             name="deepseek",
             api_key_envs=("DEEPSEEK_API_KEY",),
@@ -633,10 +828,12 @@ async def post_failure_comment(pr_number: int, reason: str) -> None:
         f"AI review could not be routed to an available provider.\n\n"
         f"Reason: {reason}\n\n"
         f"Next route:\n"
-        f"- Configure local AI with `LOCAL_AI_BASE_URL`/`AI_ROUTER_BASE_URL`, "
-        f"or configure one of the fallback provider credentials "
-        f"(`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`), "
-        f"then rerun `/ai-review`.\n"
+        f"- Configure the local/Hermes route with `HERMES_HOME`, "
+        f"`HERMES_ENV_FILE`, `LOCAL_AI_BASE_URL`, or `AI_ROUTER_BASE_URL`; "
+        f"or configure one fallback provider credential "
+        f"(`NOUS_API_KEY`, `OPENCODE_ZEN_API_KEY`, `OPENCODE_GO_API_KEY`, "
+        f"`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`).\n"
+        f"- Then rerun `/ai-review`.\n"
         f"- {AI_REVIEW_FALLBACK_ROUTE}\n\n"
         f"<!-- ai-review:route-needed -->"
     )

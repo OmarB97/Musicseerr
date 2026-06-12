@@ -2,7 +2,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from api.v1.schemas.album import AlbumInfo
+from api.v1.schemas.album import AlbumInfo, Track
 from services.album_service import AlbumService
 
 
@@ -275,4 +275,59 @@ async def test_get_album_tracks_info_heals_cached_empty_track_list():
     service._save_album_to_cache.assert_awaited_once_with(
         "f32fab67-77dd-3937-addc-9062e28e4c37",
         cached_album,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_album_tracks_info_uses_official_musicbrainz_when_configured_source_has_no_tracks():
+    service, lidarr_repo, _ = _make_service()
+    service._get_cached_album_info = AsyncMock(return_value=None)
+    service._fetch_release_group = AsyncMock(
+        return_value={
+            "releases": [
+                {"id": "release-1", "status": "Official", "country": "US"},
+            ]
+        }
+    )
+    service._mb_repo.get_release_by_id = AsyncMock(
+        return_value={
+            "media": [{"position": "1", "tracks": []}],
+            "label-info": [{"label": {"name": "Epic"}}],
+        }
+    )
+    service._fetch_official_musicbrainz_tracks = AsyncMock(
+        return_value=(
+            [
+                Track(
+                    position=1,
+                    disc_number=1,
+                    title="Wanna Be Startin' Somethin'",
+                    length=363000,
+                    recording_id="recording-1",
+                )
+            ],
+            363000,
+            {
+                "label-info": [{"label": {"name": "Epic"}}],
+                "barcode": "074643811224",
+                "country": "US",
+            },
+        )
+    )
+    lidarr_repo.is_configured.return_value = True
+    lidarr_repo.get_album_details = AsyncMock(
+        return_value={"id": 42, "monitored": True, "statistics": {"trackFileCount": 1}}
+    )
+    lidarr_repo.get_album_tracks = AsyncMock(return_value=[])
+
+    result = await service.get_album_tracks_info("f32fab67-77dd-3937-addc-9062e28e4c37")
+
+    assert result.total_tracks == 1
+    assert result.tracks[0].title == "Wanna Be Startin' Somethin'"
+    assert result.label == "Epic"
+    assert result.barcode == "074643811224"
+    assert result.country == "US"
+    service._fetch_official_musicbrainz_tracks.assert_awaited_once_with(
+        ["release-1"],
+        "f32fab67-77dd-3937-addc-9062e28e4c37",
     )

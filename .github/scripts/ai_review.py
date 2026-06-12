@@ -325,6 +325,68 @@ def build_user_prompt(
     """)
 
 
+def build_incremental_user_prompt(
+    pr_info: dict[str, Any],
+    files: list[str],
+    diff: str,
+    commit_id: str,
+) -> str:
+    """Build a focused prompt for incremental (push-to-existing-PR) reviews."""
+    file_list = "\n".join(f"  - {f}" for f in files[:50])
+    truncation = (
+        f"\n  ... and {len(files) - 50} more files" if len(files) > 50 else ""
+    )
+    short_sha = commit_id[:8]
+
+    return textwrap.dedent(f"""\
+    ## Incremental Update Review
+
+    **PR:** {pr_info['title']} (by {pr_info['author']})
+    **New commit:** `{short_sha}`
+
+    The PR was already reviewed. New commits have been pushed. Review ONLY the
+    new changes since the last review.
+
+    **Changed files in this push ({len(files)}):**
+    {file_list}{truncation}
+
+    ## Diff (new changes only)
+    ```diff
+    {diff}
+    ```
+
+    ## Instructions
+
+    You are reviewing only the **new changes** since the last AI review. Produce a
+    concise update in **valid JSON** matching this schema:
+
+    ```json
+    {{
+      "summary": "string (1-2 sentences max — what changed in this push)",
+      "findings": [
+        {{
+          "severity": "must_fix | should_fix | suggestion",
+          "file": "string (relative path, or null for PR-level findings)",
+          "line": "number | null (the new-side line number)",
+          "title": "string (short, one-line description)",
+          "body": "string (detailed explanation with reasoning and suggested fix)"
+        }}
+      ]
+    }}
+    ```
+
+    Rules:
+    - **Summary**: keep it to 1-2 sentences. Just say what the new commit changes.
+      Do not restate the entire PR description.
+    - **Findings**: only report issues introduced by the NEW changes in this diff.
+      Do not re-review unchanged code or previously-reviewed code.
+    - If the new changes look fine with no issues, return an empty `findings` list.
+    - Attach inline comments ONLY to lines that are new or modified in this diff.
+    - Focus on: security, correctness, error handling, and layer violations.
+    - Do NOT comment on formatting, whitespace, or import ordering.
+    - Be specific and actionable.
+    """)
+
 def _estimate_tokens(text: str) -> int:
     """Rough token estimate: ~4 characters per token."""
     return len(text) // 4
@@ -384,6 +446,7 @@ async def post_review(
     summary: str,
     findings: list[dict[str, Any]],
     conclusion: str,
+    incremental: bool = False,
 ) -> None:
     url = f"{GITHUB_API}/repos/{GITHUB_REPOSITORY}/pulls/{pr_number}/reviews"
 
@@ -400,13 +463,23 @@ async def post_review(
 
     findings_summary = _format_findings_for_body(findings)
 
-    body = (
-        f"{summary}\n\n"
-        f"{findings_summary}\n\n"
-        f"---\n"
-        f"*Automated review by MusicSeerr AI Reviewer. "
-        f"See `.github/review_guidelines.md` for review criteria.*"
-    )
+    if incremental:
+        body = (
+            f"## Incremental update for commit `{commit_id[:8]}`\n\n"
+            f"{summary}\n\n"
+            f"{findings_summary}\n\n"
+            f"---\n"
+            f"*Incremental review by MusicSeerr AI Reviewer. "
+            f"See `.github/review_guidelines.md` for review criteria.*"
+        )
+    else:
+        body = (
+            f"{summary}\n\n"
+            f"{findings_summary}\n\n"
+            f"---\n"
+            f"*Automated review by MusicSeerr AI Reviewer. "
+            f"See `.github/review_guidelines.md` for review criteria.*"
+        )
 
     payload: dict[str, Any] = {
         "commit_id": commit_id,
@@ -578,7 +651,11 @@ async def run() -> None:
         diff = diff[: MAX_INPUT_TOKENS * 4]
 
     system = build_system_prompt(guidelines, mode_from_env)
-    user = build_user_prompt(pr_info, files, diff, incremental=is_incremental)
+
+    if is_incremental:
+        user = build_incremental_user_prompt(pr_info, files, diff, commit_id)
+    else:
+        user = build_user_prompt(pr_info, files, diff, incremental=False)
 
     try:
         result = await call_llm(system, user)
@@ -606,9 +683,18 @@ async def run() -> None:
 
     summary = result["summary"]
     findings = result["findings"]
-    conclusion = result["conclusion"]
+    conclusion = (
+        "COMMENT" if is_incremental else result.get("conclusion", "COMMENT")
+    )
 
-    await post_review(pr_number, commit_id, summary, findings, conclusion)
+    await post_review(
+        pr_number,
+        commit_id,
+        summary,
+        findings,
+        conclusion,
+        incremental=is_incremental,
+    )
     log.info("Review posted successfully: %d findings, conclusion=%s", len(findings), conclusion)
 
 

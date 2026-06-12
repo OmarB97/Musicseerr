@@ -378,7 +378,7 @@ class AlbumService:
         try:
             cache_key = f"{ALBUM_INFO_PREFIX}{release_group_id}"
             cached_album_info = await self._get_cached_album_info(release_group_id, cache_key)
-            if cached_album_info:
+            if cached_album_info and cached_album_info.tracks:
                 return AlbumTracksInfo(
                     tracks=cached_album_info.tracks,
                     total_tracks=cached_album_info.total_tracks,
@@ -428,6 +428,15 @@ class AlbumService:
                             release_group_id[:8],
                             e,
                         )
+
+                if tracks and cached_album_info:
+                    cached_album_info.tracks = tracks
+                    cached_album_info.total_tracks = len(tracks)
+                    cached_album_info.total_length = total_length if total_length > 0 else None
+                    cached_album_info.label = label
+                    cached_album_info.barcode = barcode
+                    cached_album_info.country = country
+                    await self._save_album_to_cache(release_group_id, cached_album_info)
                 
                 return AlbumTracksInfo(
                     tracks=tracks,
@@ -444,6 +453,15 @@ class AlbumService:
                 return AlbumTracksInfo(tracks=[], total_tracks=0)
             
             label = extract_label(release_data)
+
+            if tracks and cached_album_info:
+                cached_album_info.tracks = tracks
+                cached_album_info.total_tracks = len(tracks)
+                cached_album_info.total_length = total_length if total_length > 0 else None
+                cached_album_info.label = label
+                cached_album_info.barcode = release_data.get("barcode")
+                cached_album_info.country = release_data.get("country")
+                await self._save_album_to_cache(release_group_id, cached_album_info)
             
             return AlbumTracksInfo(
                 tracks=tracks,

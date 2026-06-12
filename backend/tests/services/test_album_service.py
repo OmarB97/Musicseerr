@@ -213,3 +213,66 @@ async def test_get_album_tracks_info_falls_back_to_musicbrainz_when_lidarr_track
     assert result.label == "Epic"
     assert result.barcode == "074643811224"
     assert result.country == "US"
+
+
+@pytest.mark.asyncio
+async def test_get_album_tracks_info_heals_cached_empty_track_list():
+    service, lidarr_repo, _ = _make_service()
+    cached_album = AlbumInfo(
+        title="Thriller",
+        musicbrainz_id="f32fab67-77dd-3937-addc-9062e28e4c37",
+        artist_name="Michael Jackson",
+        artist_id="artist-id",
+        in_library=True,
+        total_tracks=0,
+        tracks=[],
+    )
+    service._get_cached_album_info = AsyncMock(return_value=cached_album)
+    service._save_album_to_cache = AsyncMock()
+    service._fetch_release_group = AsyncMock(
+        return_value={
+            "releases": [
+                {"id": "release-1", "status": "Official", "country": "US"},
+            ]
+        }
+    )
+    service._mb_repo.get_release_by_id = AsyncMock(
+        return_value={
+            "media": [
+                {
+                    "position": "1",
+                    "tracks": [
+                        {
+                            "position": "1",
+                            "title": "Wanna Be Startin' Somethin'",
+                            "length": 363000,
+                            "recording": {
+                                "id": "recording-1",
+                                "title": "Wanna Be Startin' Somethin'",
+                            },
+                        }
+                    ],
+                }
+            ],
+            "label-info": [{"label": {"name": "Epic"}}],
+            "barcode": "074643811224",
+            "country": "US",
+        }
+    )
+    lidarr_repo.is_configured.return_value = True
+    lidarr_repo.get_album_details = AsyncMock(
+        return_value={"id": 42, "monitored": True, "statistics": {"trackFileCount": 1}}
+    )
+    lidarr_repo.get_album_tracks = AsyncMock(return_value=[])
+
+    result = await service.get_album_tracks_info("f32fab67-77dd-3937-addc-9062e28e4c37")
+
+    assert result.total_tracks == 1
+    assert result.tracks[0].title == "Wanna Be Startin' Somethin'"
+    assert cached_album.total_tracks == 1
+    assert cached_album.tracks[0].title == "Wanna Be Startin' Somethin'"
+    assert cached_album.label == "Epic"
+    service._save_album_to_cache.assert_awaited_once_with(
+        "f32fab67-77dd-3937-addc-9062e28e4c37",
+        cached_album,
+    )

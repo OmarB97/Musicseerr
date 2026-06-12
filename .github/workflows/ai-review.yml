@@ -67,8 +67,12 @@ jobs:
       - name: Run AI review
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          AI_REVIEW_PROVIDER_ORDER: ${{ vars.AI_REVIEW_PROVIDER_ORDER || 'deepseek,openrouter,openai' }}
+          AI_REVIEW_PROVIDER_ORDER: ${{ vars.AI_REVIEW_PROVIDER_ORDER || 'local-ai,deepseek,openrouter,openai' }}
           AI_REVIEW_FALLBACK_ROUTE: ${{ vars.AI_REVIEW_FALLBACK_ROUTE || 'Route this PR to another configured reviewer lane, then rerun `/ai-review`.' }}
+          LOCAL_AI_BASE_URL: ${{ vars.LOCAL_AI_BASE_URL || vars.AI_ROUTER_BASE_URL }}
+          LOCAL_AI_MODEL: ${{ vars.LOCAL_AI_MODEL || vars.AI_ROUTER_MODEL || 'qwen3.6-27b' }}
+          LOCAL_AI_API_KEY: ${{ secrets.LOCAL_AI_API_KEY || secrets.AI_ROUTER_API_KEY }}
+          AI_ROUTER_API_KEY: ${{ secrets.AI_ROUTER_API_KEY }}
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           DEEPSEEK_BASE_URL: ${{ vars.DEEPSEEK_BASE_URL || 'https://api.deepseek.com' }}
           DEEPSEEK_MODEL: ${{ vars.DEEPSEEK_MODEL || 'deepseek-v4-pro' }}

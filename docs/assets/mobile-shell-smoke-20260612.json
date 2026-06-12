@@ -1,0 +1,13 @@
+{
+  "apiNote": "PUBLIC_API_URL=https://music.kostudios.io from localhost rendered shell; API requests reported Failed to fetch in local cross-origin smoke.",
+  "appleCapable": "yes",
+  "bottomNavText": "Home Discover Search Library Settings",
+  "drawerDisplay": "none",
+  "horizontalOverflow": false,
+  "searchModalOpen": true,
+  "viewport": {
+    "height": 844,
+    "width": 390
+  },
+  "viewportMeta": "width=device-width, initial-scale=1, viewport-fit=cover"
+}

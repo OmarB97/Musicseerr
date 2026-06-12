@@ -23,7 +23,7 @@ from openai import OpenAI
 
 AI_REVIEW_PROVIDER_ORDER = os.getenv(
     "AI_REVIEW_PROVIDER_ORDER",
-    "deepseek,openrouter,openai",
+    "local-ai,deepseek,openrouter,openai",
 )
 AI_REVIEW_FALLBACK_ROUTE = os.getenv(
     "AI_REVIEW_FALLBACK_ROUTE",
@@ -33,6 +33,17 @@ AI_REVIEW_FALLBACK_ROUTE = os.getenv(
 DEEPSEEK_BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com")
 DEEPSEEK_MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 DEEPSEEK_REASONING_EFFORT = os.getenv("DEEPSEEK_REASONING_EFFORT", "max")
+
+LOCAL_AI_BASE_URL = (
+    os.getenv("LOCAL_AI_BASE_URL")
+    or os.getenv("AI_ROUTER_BASE_URL")
+    or ""
+)
+LOCAL_AI_MODEL = (
+    os.getenv("LOCAL_AI_MODEL")
+    or os.getenv("AI_ROUTER_MODEL")
+    or "qwen3.6-27b"
+)
 
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1")
 OPENROUTER_MODEL = os.getenv("OPENROUTER_MODEL", "openai/gpt-5-mini")
@@ -57,9 +68,11 @@ log = logging.getLogger("ai_review")
 @dataclass(frozen=True)
 class ReviewProvider:
     name: str
-    api_key_env: str
+    api_key_envs: tuple[str, ...]
     base_url: str
     model: str
+    requires_api_key: bool = True
+    requires_base_url: bool = False
     reasoning_effort: str | None = None
     extra_body: dict[str, Any] | None = None
     default_headers: dict[str, str] | None = None
@@ -383,10 +396,22 @@ def _estimate_tokens(text: str) -> int:
 # ---------------------------------------------------------------------------
 
 def _review_providers() -> list[ReviewProvider]:
+    local_ai = ReviewProvider(
+        name="local-ai",
+        api_key_envs=("LOCAL_AI_API_KEY", "AI_ROUTER_API_KEY"),
+        base_url=LOCAL_AI_BASE_URL,
+        model=LOCAL_AI_MODEL,
+        requires_api_key=False,
+        requires_base_url=True,
+    )
     providers = {
+        "local-ai": local_ai,
+        "local_ai": local_ai,
+        "ai-router": local_ai,
+        "ai_router": local_ai,
         "deepseek": ReviewProvider(
             name="deepseek",
-            api_key_env="DEEPSEEK_API_KEY",
+            api_key_envs=("DEEPSEEK_API_KEY",),
             base_url=DEEPSEEK_BASE_URL,
             model=DEEPSEEK_MODEL,
             reasoning_effort=DEEPSEEK_REASONING_EFFORT,
@@ -394,7 +419,7 @@ def _review_providers() -> list[ReviewProvider]:
         ),
         "openrouter": ReviewProvider(
             name="openrouter",
-            api_key_env="OPENROUTER_API_KEY",
+            api_key_envs=("OPENROUTER_API_KEY",),
             base_url=OPENROUTER_BASE_URL,
             model=OPENROUTER_MODEL,
             default_headers={
@@ -407,7 +432,7 @@ def _review_providers() -> list[ReviewProvider]:
         ),
         "openai": ReviewProvider(
             name="openai",
-            api_key_env="OPENAI_API_KEY",
+            api_key_envs=("OPENAI_API_KEY",),
             base_url=OPENAI_BASE_URL,
             model=OPENAI_MODEL,
         ),
@@ -431,9 +456,14 @@ async def call_llm(system: str, user: str) -> LLMReview:
     failures: list[str] = []
 
     for provider in _review_providers():
-        api_key = os.environ.get(provider.api_key_env, "")
-        if not api_key:
-            skipped.append(f"{provider.name} ({provider.api_key_env} is not set)")
+        if provider.requires_base_url and not provider.base_url:
+            skipped.append(f"{provider.name} (base URL is not configured)")
+            continue
+
+        api_key = _provider_api_key(provider)
+        if not api_key and provider.requires_api_key:
+            envs = " or ".join(provider.api_key_envs)
+            skipped.append(f"{provider.name} ({envs} is not set)")
             continue
 
         if not provider.model:
@@ -441,13 +471,21 @@ async def call_llm(system: str, user: str) -> LLMReview:
             continue
 
         try:
-            data = await _call_provider(provider, api_key, system, user)
+            data = await _call_provider(provider, api_key or "not-needed", system, user)
             return LLMReview(provider=provider, data=data)
         except Exception as exc:
             log.exception("AI review provider failed: %s", provider.name)
             failures.append(f"{provider.name}: {exc}")
 
     raise NoReviewProviderError(skipped, failures)
+
+
+def _provider_api_key(provider: ReviewProvider) -> str:
+    for env_name in provider.api_key_envs:
+        value = os.environ.get(env_name, "")
+        if value:
+            return value
+    return ""
 
 
 async def _call_provider(
@@ -595,9 +633,10 @@ async def post_failure_comment(pr_number: int, reason: str) -> None:
         f"AI review could not be routed to an available provider.\n\n"
         f"Reason: {reason}\n\n"
         f"Next route:\n"
-        f"- Configure one of the fallback provider credentials "
-        f"(`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`) "
-        f"and rerun `/ai-review`.\n"
+        f"- Configure local AI with `LOCAL_AI_BASE_URL`/`AI_ROUTER_BASE_URL`, "
+        f"or configure one of the fallback provider credentials "
+        f"(`DEEPSEEK_API_KEY`, `OPENROUTER_API_KEY`, or `OPENAI_API_KEY`), "
+        f"then rerun `/ai-review`.\n"
         f"- {AI_REVIEW_FALLBACK_ROUTE}\n\n"
         f"<!-- ai-review:route-needed -->"
     )

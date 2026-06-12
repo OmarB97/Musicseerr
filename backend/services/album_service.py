@@ -3,6 +3,7 @@ import asyncio
 import time
 from typing import Optional, TYPE_CHECKING
 import msgspec
+import httpx
 from api.v1.schemas.album import AlbumInfo, AlbumBasicInfo, AlbumTracksInfo, Track
 from repositories.protocols import LidarrRepositoryProtocol, MusicBrainzRepositoryProtocol
 from services.preferences_service import PreferencesService
@@ -507,6 +508,45 @@ class AlbumService:
             found_tracks, found_length = extract_tracks(result)
             if found_tracks:
                 return found_tracks, found_length, result
+
+        return await self._fetch_official_musicbrainz_tracks(candidate_ids, release_group_id)
+
+    async def _fetch_official_musicbrainz_tracks(
+        self,
+        candidate_ids: list[str],
+        release_group_id: str,
+    ) -> tuple[list[Track], int, dict | None]:
+        if not candidate_ids:
+            return [], 0, None
+
+        logger.info(
+            "Album %s: configured MusicBrainz release data had no tracks; trying official MusicBrainz",
+            release_group_id[:8],
+        )
+
+        headers = {"User-Agent": "MusicSeerr/1.0 (https://github.com/HabiRabbu/Musicseerr)"}
+        timeout = httpx.Timeout(10.0)
+        async with httpx.AsyncClient(headers=headers, timeout=timeout) as client:
+            for release_id in candidate_ids:
+                try:
+                    response = await client.get(
+                        f"https://musicbrainz.org/ws/2/release/{release_id}",
+                        params={"inc": "recordings+labels", "fmt": "json"},
+                    )
+                    response.raise_for_status()
+                    release_data = response.json()
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "Official MusicBrainz release fallback failed for %s/%s: %s",
+                        release_group_id[:8],
+                        release_id[:8],
+                        e,
+                    )
+                    continue
+
+                tracks, total_length = extract_tracks(release_data)
+                if tracks:
+                    return tracks, total_length, release_data
 
         return [], 0, None
 
